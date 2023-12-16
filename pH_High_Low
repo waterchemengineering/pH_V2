@@ -1,0 +1,780 @@
+#include <LiquidCrystal_I2C.h>
+#include <DS3231.h>
+#include <RTClib.h>
+#include <Wire.h>
+
+#include <EEPROM.h>
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <avr/wdt.h>
+//#define F_CPU 16000000UL
+#include <util/delay.h>
+void enable_interrupt_timer2();
+
+// Save or Exit Button
+#define SW1_SET_INPUT (DDRD &= ~(1 << PD7))
+#define SW1_SET_PULLUPS (PORTD |= (1 << PD7))
+#define SW1 (!(PIND & (1 << PD7)))
+
+// Value Up Button
+#define SW2_SET_INPUT (DDRD &= ~(1 << PD6))
+#define SW2_SET_PULLUPS (PORTD |= (1 << PD6))
+#define SW2 (!(PIND & (1 << PD6)))
+
+// Value Down Button
+#define SW3_SET_INPUT (DDRD &= ~(1 << PD5))
+#define SW3_SET_PULLUPS (PORTD |= (1 << PD5))
+#define SW3 (!(PIND & (1 << PD5)))
+
+// Menu Up Button
+#define SW4_SET_INPUT (DDRD &= ~(1 << PD4))
+#define SW4_SET_PULLUPS (PORTD |= (1 << PD4))
+#define SW4 (!(PIND & (1 << PD4)))
+
+// Menu Down Button
+#define SW5_SET_INPUT (DDRD &= ~(1 << PD3))
+#define SW5_SET_PULLUPS (PORTD |= (1 << PD3))
+#define SW5 (!(PIND & (1 << PD3)))
+
+// Extra Button Vacant
+#define SW6_SET_INPUT (DDRD &= ~(1 << PD2))
+#define SW6_SET_PULLUPS (PORTD |= (1 << PD2))
+#define SW6 (!(PIND & (1 << PD2)))
+
+DS3231 rtc(SDA, SCL);
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+int menuCounter = 1;
+int maxMenu = 10;
+
+int toggleDelay = 50;
+
+bool on = 1;
+bool off = 0;
+
+String hour;
+String minute;
+String sec;
+
+String day;
+String month;
+String Year;
+
+//----Current Time Store
+int getHour;
+int getMin;
+int getSecond;
+
+//------Timer Set
+int onhour = 0;
+int onmin = 0;
+int onsec = 0;
+
+//------date Set
+int onday = 1;
+int onmonth = 1;
+int onyear = 2023;
+
+unsigned long currentSecond = 0;
+
+
+byte up[8] = {
+  B11111,
+  B11111,
+  B00000,
+  B00000,
+  B00000,
+  B00000,
+  B00000,
+  B00000,
+};
+
+byte down[8] = {
+
+  B00000,
+  B00000,
+  B00000,
+  B00000,
+  B00000,
+  B00000,
+  B11111,
+  B11111,
+};
+
+byte left[8] = {
+
+  B11000,
+  B11000,
+  B11000,
+  B11000,
+  B11000,
+  B11000,
+  B11000,
+  B11000,
+};
+
+byte right[8] = {
+
+  B00011,
+  B00011,
+  B00011,
+  B00011,
+  B00011,
+  B00011,
+  B00011,
+  B00011,
+};
+
+// pH Sensor Setup
+#include "DFRobot_PH.h"
+#define PH_PIN A0
+float voltage, phValue, temperature = 25;
+DFRobot_PH ph;
+
+float pHLowerLimit = 6.0;
+float pHUpperLimit = 8.0;
+
+int r1 = 40;
+int r2 = 41;
+int r3 = 37;
+int r4 = 36;
+int r5 = 35;
+int r6 = 34;
+
+// As EEPROM can't store float value therefore Integer value must be stored
+int pHLowerInteger;
+int pHUpperInteger;
+
+// Convert To String for Concatenation Of Decimal Values
+String pHLowerStringLimit;
+String pHUpperStringLimit;
+
+String DosingPumpStatus = "ON";
+
+void setup() {
+
+  Serial.begin(9600);
+  wdt_enable(WDTO_8S);
+  Wire.begin();
+  rtc.begin();
+  lcd.begin();
+  lcd.backlight();
+  lcd.clear();
+
+  lcd.createChar(0, up);
+  lcd.createChar(1, down);
+  lcd.createChar(2, left);
+  lcd.createChar(3, right);
+
+  lcd.home();
+
+  pinMode(r1, OUTPUT);
+  pinMode(r2, OUTPUT);
+  pinMode(r3, OUTPUT);
+  pinMode(r4, OUTPUT);
+  pinMode(r5, OUTPUT);
+  pinMode(r6, OUTPUT);
+
+  digitalWrite(r1, off);
+  digitalWrite(r2, off);
+  digitalWrite(r3, off);
+  digitalWrite(r4, off);
+  digitalWrite(r5, off);
+  digitalWrite(r6, off);
+
+  // pinMode(buzzerPin, OUTPUT);
+  lcd.setCursor(2, 0);
+  lcd.print("AUTOMATED DOSING ");
+  lcd.setCursor(2, 1);
+  lcd.print("& MONITORING BY");
+  lcd.setCursor(5, 2);
+  lcd.print("WATERCHEM");
+  lcd.setCursor(4, 3);
+  lcd.print("ENGINEERING");
+  delay(3000);
+  lcd.clear();
+
+  // Store Value in EEPROM for First Time of Boot
+  // updatePHUpperLimit();
+  // updatePHLowerLimit();
+  // updateDP1Limit();
+  // updateDP2Limit();
+  // updateTDSLimit();
+}
+
+// Data Update to EEPROM
+void updatePHLowerLimit() {
+  EEPROM.update(2, pHLowerInteger);
+}
+
+void updatePHUpperLimit() {
+  EEPROM.update(3, pHUpperInteger);
+}
+
+void getFromEP() {
+  // Read pH Limit Stored Value in EEPROM
+  pHLowerInteger = EEPROM.read(2);
+  pHUpperInteger = EEPROM.read(3);
+}
+
+// Get The Time and Date from RTC
+void rtcGetTimeAndDate() {
+  hour = rtc.getTimeStr();
+  day = rtc.getDateStr();
+  temperature = rtc.getTemp()-3;
+
+  Year = day.substring(6, 10);
+  month = day.substring(3, 5);
+  day = day.substring(0, 2);
+
+  minute = hour.substring(3, 5);
+  sec = hour.substring(6, 8);
+  hour = hour.substring(0, 2);
+
+  getHour = hour.toInt();
+  getMin = minute.toInt();
+  getSecond = sec.toInt();
+}
+
+// Display Current pH & TDS, Delta Pressure
+void displayPH() {
+  getFromEP();
+
+  pHLowerStringLimit = (String(pHLowerInteger / 10) + "." + String(pHLowerInteger % 10));
+
+  pHLowerLimit = pHLowerStringLimit.toFloat();
+
+  // Display Date & Time
+  lcd.setCursor(0, 0);
+  lcd.print(rtc.getDateStr());
+  lcd.print(" ");
+  lcd.print(rtc.getTimeStr());
+
+  lcd.setCursor(0, 1);
+  lcd.print("PH : ");
+  lcd.print(phValue, 2);
+  lcd.print("  ");
+  lcd.print("T: ");
+  lcd.print(temperature,1);
+  lcd.print(" ");
+  lcd.setCursor(0, 2);
+  lcd.print("UL : ");
+  lcd.print(pHUpperLimit, 1);
+  lcd.print("  LL : ");
+  lcd.print(pHLowerLimit, 1);
+  lcd.print(" ");
+  lcd.setCursor(0, 3);
+  lcd.print("ALARM STATUS : ");
+  lcd.print(DosingPumpStatus);
+  lcd.print("   ");
+}
+
+// Set Minutes by pushbuttons for RTC time Set
+void toggleMin() {
+  if (onmin > 59) {
+    onmin = 0;
+  }
+  if (SW2 && onmin < 59) {
+    onmin += 1;
+    delay(toggleDelay);
+  }
+  if (SW1) {
+    saveTime();
+    delay(toggleDelay);
+  }
+  if (SW3 && onmin > 0) {
+    onmin -= 1;
+    delay(toggleDelay);
+  }
+
+  lcd.setCursor(0, 0);
+  lcd.print("   SET CLOCK TIME");
+  lcd.setCursor(0, 1);
+
+  lcd.print("  HOURS : ");
+  if (onhour < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onhour);
+  lcd.setCursor(0, 2);
+  lcd.print("* ");
+  lcd.print("MINUTES : ");
+  if (onmin < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onmin);
+  lcd.setCursor(0, 3);
+  lcd.print("  SECONDS : ");
+  if (onsec < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onsec);
+
+  MenuCounter();
+}
+
+// Set the Hours by pushbuttons for RTC time Set
+void toggleHour() {
+  if (SW1) {
+    saveTime();
+    delay(toggleDelay);
+  }
+  if (onhour > 23) {
+    onhour = 0;
+  }
+  if (SW2 && onhour < 23) {
+
+
+    onhour += 1;
+    delay(toggleDelay);
+  }
+  if (SW3 && onhour > 0) {
+
+
+    onhour -= 1;
+    delay(toggleDelay);
+  }
+  MenuCounter();
+
+  lcd.setCursor(0, 0);
+  lcd.print("   SET CLOCK TIME");
+  lcd.setCursor(0, 1);
+  lcd.print("* ");
+  lcd.print("HOURS : ");
+  if (onhour < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onhour);
+  lcd.setCursor(0, 2);
+  lcd.print("  MINUTES : ");
+  if (onmin < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onmin);
+  lcd.setCursor(0, 3);
+  lcd.print("  SECONDS : ");
+  if (onsec < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onsec);
+}
+
+// Set the seconds by pushbuttons for RTC time Set
+void toggleSecond() {
+  if (onsec > 59) {
+    onsec = 0;
+  }
+  if (SW2 && onsec < 59) {
+
+
+    onsec += 1;
+
+    delay(toggleDelay);
+  }
+  if (SW1) {
+    saveTime();
+  }
+  if (SW3 && onsec > 0) {
+
+
+    onsec -= 1;
+
+    delay(toggleDelay);
+  }
+  MenuCounter();
+  lcd.setCursor(0, 0);
+  lcd.print("   SET CLOCK TIME");
+  lcd.setCursor(0, 1);
+
+  lcd.print("  HOURS : ");
+  if (onhour < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onhour);
+  lcd.setCursor(0, 2);
+  lcd.print("  MINUTES : ");
+  if (onmin < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onmin);
+  lcd.setCursor(0, 3);
+  lcd.print("* ");
+  lcd.print("SECONDS : ");
+  if (onsec < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onsec);
+}
+
+// Set the Day by pushbuttons for RTC time Set
+void toggleDay() {
+  if (SW1) {
+    saveDate();
+  }
+  if (onday > 31) {
+    onday = 1;
+  }
+  if (SW2 && onday < 31) {
+    onday += 1;
+    delay(toggleDelay);
+  }
+  if (SW3 && onday > 1) {
+    onday -= 1;
+    delay(toggleDelay);
+  }
+  MenuCounter();
+
+  lcd.setCursor(0, 0);
+  lcd.print("   SET CLOCK DATE");
+  lcd.setCursor(0, 1);
+  lcd.print("* ");
+  lcd.print("DAY : ");
+  if (onday < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onday);
+  lcd.print("          ");
+  lcd.setCursor(0, 2);
+  lcd.print("  MONTH : ");
+  if (onmonth < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onmonth);
+  lcd.print("        ");
+  lcd.setCursor(0, 3);
+  lcd.print("  YEAR : ");
+  lcd.print(onyear);
+  lcd.print("       ");
+}
+
+// Set the Month by pushbuttons for RTC time Set
+void toggleMonth() {
+  if (SW1) {
+    saveDate();
+  }
+  if (onmonth > 12) {
+    onmonth = 1;
+  }
+  if (SW2 && onmonth < 12) {
+    onmonth += 1;
+    delay(toggleDelay);
+  }
+  if (SW3 && onmonth > 1) {
+    onmonth -= 1;
+    delay(toggleDelay);
+  }
+  MenuCounter();
+
+  lcd.setCursor(0, 0);
+  lcd.print("   SET CLOCK DATE");
+  lcd.setCursor(0, 1);
+
+  lcd.print("  DAY : ");
+  if (onday < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onday);
+  lcd.print("          ");
+  lcd.setCursor(0, 2);
+  lcd.print("* ");
+  lcd.print("MONTH : ");
+  if (onmonth < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onmonth);
+  lcd.print("        ");
+  lcd.setCursor(0, 3);
+
+  lcd.print("  YEAR : ");
+  lcd.print(onyear);
+  lcd.print("       ");
+}
+
+// Set the Year by pushbuttons for RTC time Set
+void toggleYear() {
+  if (SW1) {
+
+    saveDate();
+  }
+  if (onyear > 3000) {
+    onyear = 2001;
+  }
+  if (SW2 && onyear < 2100) {
+
+
+    onyear += 1;
+
+    delay(toggleDelay);
+  }
+  if (SW3 && onyear > 2000) {
+
+
+    onyear -= 1;
+
+    delay(toggleDelay);
+  }
+  MenuCounter();
+
+  lcd.setCursor(0, 0);
+  lcd.print("   SET CLOCK DATE");
+  lcd.setCursor(0, 1);
+
+  lcd.print("  DAY : ");
+  if (onday < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onday);
+  lcd.print("          ");
+  lcd.setCursor(0, 2);
+  lcd.print("  MONTH : ");
+  if (onmonth < 10) {
+    lcd.print(" ");
+  }
+  lcd.print(onmonth);
+  lcd.print("        ");
+  lcd.setCursor(0, 3);
+  lcd.print("* ");
+  lcd.print("YEAR : ");
+  lcd.print(onyear);
+  lcd.print("       ");
+}
+
+// Fetch pH Value from the Sensor
+void getPh() {
+  static unsigned long timepoint = millis();
+  if (millis() - timepoint > 3500) {  
+    timepoint = millis();
+    //temperature = readTemperature();         // read your temperature sensor to execute temperature compensation
+    voltage = analogRead(PH_PIN) / 1024.0 * 5000;  // read the voltage
+    phValue = ph.readPH(voltage, temperature);     // convert voltage to pH with temperature compensation
+  }
+  ph.calibration(voltage, temperature);
+}
+
+int getMedianNum(int bArray[], int iFilterLen) {
+  int bTab[iFilterLen];
+  for (byte i = 0; i < iFilterLen; i++)
+    bTab[i] = bArray[i];
+  int i, j, bTemp;
+  for (j = 0; j < iFilterLen - 1; j++) {
+    for (i = 0; i < iFilterLen - j - 1; i++) {
+      if (bTab[i] > bTab[i + 1]) {
+        bTemp = bTab[i];
+        bTab[i] = bTab[i + 1];
+        bTab[i + 1] = bTemp;
+      }
+    }
+  }
+  if ((iFilterLen & 1) > 0)
+    bTemp = bTab[(iFilterLen - 1) / 2];
+  else
+    bTemp = (bTab[iFilterLen / 2] + bTab[iFilterLen / 2 - 1]) / 2;
+  return bTemp;
+}
+
+// Set pH Lower Limit by Pushbutton
+void togglePhUpperLimit() {
+  getFromEP();
+  pHUpperStringLimit = (String(pHUpperInteger / 10) + "." + String(pHUpperInteger % 10));
+  pHUpperLimit = pHUpperStringLimit.toFloat();
+
+  if (SW2 && pHUpperLimit < 14.0) {
+    pHUpperInteger += 1;
+    delay(toggleDelay);
+    updatePHUpperLimit();
+  }
+  if (SW3 && pHUpperLimit > 1.0) {
+    pHUpperInteger -= 1;
+    delay(toggleDelay);
+    updatePHUpperLimit();
+  }
+
+  MenuCounter();
+
+  lcd.setCursor(0, 0);
+  lcd.print("    SET PH LIMIT    ");
+  lcd.setCursor(0, 1);
+  lcd.print("                    ");
+  lcd.setCursor(0, 2);
+  lcd.print("*");
+  lcd.print(" UPPER LIMIT : ");
+  lcd.print(pHUpperLimit, 1);
+  lcd.print(" ");
+  lcd.setCursor(0, 3);
+  lcd.print("                    ");
+}
+
+// Set pH Lower Limit by Pushbutton
+void togglePhLowerLimit() {
+  getFromEP();
+  pHLowerStringLimit = (String(pHLowerInteger / 10) + "." + String(pHLowerInteger % 10));
+  pHLowerLimit = pHLowerStringLimit.toFloat();
+
+  if (SW2 && pHLowerLimit < 14.0) {
+    pHLowerInteger += 1;
+    delay(toggleDelay);
+    updatePHLowerLimit();
+  }
+  if (SW3 && pHLowerLimit > 1.0) {
+    pHLowerInteger -= 1;
+    delay(toggleDelay);
+    updatePHLowerLimit();
+  }
+
+  MenuCounter();
+
+  lcd.setCursor(0, 0);
+  lcd.print("    SET PH LIMIT    ");
+  lcd.setCursor(0, 1);
+  lcd.print("                    ");
+  lcd.setCursor(0, 2);
+  lcd.print("*");
+  lcd.print(" LOWER LIMIT : ");
+  lcd.print(pHLowerLimit, 1);
+  lcd.print(" ");
+  lcd.setCursor(0, 3);
+  lcd.print("                    ");
+}
+
+void exit() {
+  if (SW6) {
+    menuCounter = 1;
+    delay(400);
+  }
+}
+
+void MenuCounter() {
+  if ((SW4) && (menuCounter < maxMenu - 1)) {
+    lcd.clear();
+    menuCounter += 1;
+    delay(200);
+    if (menuCounter > maxMenu) menuCounter = 1;
+  }
+  if ((SW5) && (menuCounter > 1)) {
+    lcd.clear();
+    menuCounter -= 1;
+    delay(200);
+    if (menuCounter > maxMenu) menuCounter = 1;
+  }
+}
+
+void saveTime() {
+  rtc.setTime(onhour, onmin, onsec);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  menuCounter = 0;
+}
+
+void saveDate() {
+  rtc.setDate(onday, onmonth, onyear);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+
+  menuCounter = 0;
+}
+
+// Push The Siren When Parameters Get Out Of The Limits
+void DosingOnOff() {
+  if (phValue < pHLowerLimit || phValue > pHUpperLimit) {
+    digitalWrite(r1, on);
+    DosingPumpStatus = "ON";
+  } else {
+    digitalWrite(r1, off);
+    DosingPumpStatus = "OFF";
+  }
+}
+
+void getAllData() {
+  getPh();
+  getFromEP();
+  DosingOnOff();
+  rtcGetTimeAndDate();
+  exit();
+}
+
+void loop() {
+  wdt_reset();
+  
+  switch (menuCounter) {
+    // Display pH & Date Time
+    case 1:
+      {
+        getAllData();
+        displayPH();
+        getFromEP();
+        MenuCounter();
+      }
+      break;
+
+      // Set Hour by Pushbutton
+    case 2:
+      {
+        getAllData();
+        MenuCounter();
+        toggleHour();
+      }
+      break;
+      // Set Minutes by Pushbutton
+    case 3:
+      {
+        getAllData();
+        MenuCounter();
+        toggleMin();
+      }
+      break;
+      // Set Seconds by Pushbutton
+    case 4:
+      {
+        getAllData();
+        MenuCounter();
+        toggleSecond();
+      }
+      break;
+
+      // Set Day by Pushbutton
+    case 5:
+      {
+
+        getAllData();
+        MenuCounter();
+        toggleDay();
+      }
+      break;
+      // Set Month by Pushbutton
+    case 6:
+      {
+
+        getAllData();
+        MenuCounter();
+        toggleMonth();
+      }
+      break;
+      // Set Year by Pushbutton
+    case 7:
+      {
+
+        getAllData();
+        MenuCounter();
+        toggleYear();
+      }
+      break;
+    // Set pH Lower Limit
+    case 8:
+      {
+
+        getAllData();
+        MenuCounter();
+        togglePhLowerLimit();
+      }
+      break;
+      case 9:
+      {
+
+        getAllData();
+        MenuCounter();
+        togglePhUpperLimit();
+      }
+      break;
+  }
+}
